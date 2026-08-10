@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets / config
+.env
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+secrets.*
+
+# Models / large binaries — download separately
+*.onnx
+*.onnx.json
+*.gguf
+*.bin
+models/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+# Browser profile / runtime data — NEVER commit
+chrome-profile/
