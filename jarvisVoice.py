@@ -14,6 +14,60 @@ from playwright.sync_api import sync_playwright
 from urllib.parse import quote_plus
 import psutil
 import time
+import mss, mss.tools, base64
+import threading
+
+VISION_MODEL = "qwen3-vl:8b"          # flip to "qwen3-vl:4b" once pulled
+stop_watch = threading.Event()
+watching = False
+
+def capture_screen(monitor=1):
+    with mss.MSS() as sct:
+        shot = sct.grab(sct.monitors[monitor])
+    return base64.b64encode(mss.tools.to_png(shot.rgb, shot.size)).decode("utf-8")
+
+def describe_screen(frame_b64, prev=""):
+    sys = ("You narrate a live screen out loud for Hunter. In ONE short spoken "
+           "sentence, say only what is happening or what just changed. No markdown. "
+           "If nothing meaningful changed, reply exactly: (no change)")
+    user = "Here is the screen now."
+    if prev:
+        user += f" Your last line was: '{prev}'. Say what's different now."
+    try:
+        r = requests.post(OLLAMA_URL, timeout=(3, 120), json={
+            "model": VISION_MODEL, "stream": False,
+            "messages": [{"role": "system", "content": sys},
+                         {"role": "user", "content": user, "images": [frame_b64]}]})
+        r.raise_for_status()
+        return r.json()["message"].get("content", "").strip()
+    except requests.exceptions.RequestException:
+        return ""
+
+def watch_screen(interval=0.4):
+    global watching
+    watching = True
+    stop_watch.clear()
+    speak("Watching your screen. Say stop watching when you're done.")
+    prev = ""
+    while not stop_watch.is_set():
+        if listening.is_set():            # you're talking — don't narrate over you
+            stop_watch.wait(0.3)
+            continue
+        desc = describe_screen(capture_screen(), prev)
+        if listening.is_set():            # you started mid-frame — drop this line
+            continue
+        if desc and desc.lower() != "(no change)" and desc != prev:
+            speak(desc)
+            prev = desc
+        stop_watch.wait(interval)
+    watching = False
+_speak_lock = threading.Lock()
+listening = threading.Event()   # set while the main loop is capturing a command
+def watch_screen_tool(args=None):
+    if watching:
+        return "Already watching."
+    threading.Thread(target=watch_screen, daemon=True).start()
+    return "Watching the screen now."
 
 print("Loading whisper model (first run downloads it, ~150MB)...")
 whisper = WhisperModel("base.en", device="cpu", compute_type="int8")
@@ -43,9 +97,10 @@ def speak(text):
     if not text or not text.strip():
         print("  [tts] nothing to say")
         return
-    with wave.open("reply.wav", "wb") as f:
-        voice.synthesize_wav(text, f)
-    winsound.PlaySound("reply.wav", winsound.SND_FILENAME)
+    with _speak_lock:
+        with wave.open("reply.wav", "wb") as f:
+            voice.synthesize_wav(text, f)
+        winsound.PlaySound("reply.wav", winsound.SND_FILENAME)
 def beep(freq=900, duration=0.15):
     t = np.linspace(0, duration, int(duration * SAMPLE_RATE), False)
     tone = (0.3 * np.sin(2 * np.pi * freq * t)).astype("float32")
@@ -97,16 +152,6 @@ def transcribe(audio):
 import datetime
 
 _pw = _page = None
-
-def _page_handle():
-    global _pw, _page
-    if _page is not None and not _page.is_closed():
-        return _page
-    if _pw is None:
-        _pw = sync_playwright().start()
-    ctx = _pw.chromium.connect_over_cdp("http://localhost:9222").contexts[0]
-    _page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    return _page
 
 def browse(args):
     url = args.get("url", "").strip()
@@ -234,6 +279,11 @@ TOOLS.append(
                 "description": "The app to open, e.g. 'spotify' or 'chrome'"}},
             "required": ["name"]}}}
 )
+TOOLS.append({"type": "function", "function": {"name": "watch_screen",
+    "description": "Start narrating what is happening on the user's screen out "
+                   "loud, live, until they say stop. Use when the user asks you to "
+                   "watch, describe, or narrate their screen.",
+    "parameters": {"type": "object", "properties": {}}}})
 TOOLS += [
     {"type": "function", "function": {"name": "browse",
         "description": "Navigate the browser to a URL",
@@ -263,14 +313,13 @@ TOOL_FUNCS = {"get_time": get_time, "get_weather": get_weather,
               "check_jellyfin": check_jellyfin, "open_app": open_app,
               "browse": browse, "web_search": web_search,
               "read_page": read_page, "list_clickables": list_clickables,
-              "click": click}
+              "click": click, "watch_screen": watch_screen_tool}
 def chat_request(msgs):
     game = game_running()
     model = "gemma4:e4b" if game else "gemma4"
     if game:
         print(f"  [game mode] {game} detected -> using {model}")
     try:
-        ...
         r = requests.post("http://localhost:11434/api/chat",
                           json={"model": model, "messages": msgs,
                                 "stream": False, "tools": TOOLS},
@@ -320,22 +369,78 @@ def ask_jarvis(text):
             messages.append({"role": "tool", "content": str(result),
                              "tool_name": name})
     return "I got stuck working on that one."
+
+OPEN_VERBS = ("open", "launch", "start", "run", "pull up",
+              "bring up", "fire up", "boot up")
+
+def route_command(text):
+    t = text.lower().strip()
+
+    # 0. Stop watching — check first so it isn't shadowed
+    if watching and any(p in t for p in ("stop watching", "stop looking",
+            "stop narrating", "quit watching", "that's enough")):
+        stop_watch.set()
+        speak("Okay, I'll stop watching.")
+        return True
+
+    # 1. Start watching
+    WATCH = ("watch my screen", "watch the screen", "watch screen",
+             "look at my screen", "looking at my screen", "view my screen",
+             "narrate my screen", "see my screen",
+             "what's happening on my screen", "what is happening on my screen")
+    if not watching and any(p in t for p in WATCH):
+        watch_screen_tool()
+        return True
+
+    for kw in ("search the web for ", "search for ", "google ", "look up "):
+        if t.startswith(kw):
+            speak(web_search({"query": text[len(kw):].strip()}))
+            return True
+    for kw in ("go to ", "navigate to ", "browse to ", "open the website "):
+        if t.startswith(kw):
+            speak(browse({"url": text[len(kw):].strip()}))
+            return True
+    if t.startswith("click "):
+        speak(click({"text": text[len("click "):].strip()}))
+        return True
+
+    if t.startswith("what time") or "the time" in t or "current time" in t:
+        speak(get_time({})); return True
+    if "weather" in t:
+        speak(get_weather({})); return True
+    if "jellyfin" in t or "media server" in t:
+        speak(check_jellyfin({})); return True
+    if "read the page" in t or "read this page" in t or "read the screen" in t:
+        speak(read_page({})); return True
+    if "what can i click" in t or "list links" in t or "list clickables" in t:
+        speak(list_clickables({})); return True
+
+    if any(v in t for v in OPEN_VERBS):
+        for app in APPS:                 # APPS keys ARE the app names
+            if app in t:
+                speak(open_app({"name": app}))
+                return True
+
+    return False   
 while True:
     print("\nWaiting for wake word...")
     wait_for_wake()
-    beep()   # ack beep so you know it heard you
+    listening.set()                   # hush narration while you speak
+    beep()
     audio = record_command()
-
     text = transcribe(audio)
+    listening.clear()
     if not text:
         print("Heard nothing intelligible.")
         continue
-
     print(f"You said: {text}")
+
+    if route_command(text):
+        continue
+
     reply = ask_jarvis(text) or "Sorry, I couldn't work that one out."
     print(f"Jarvis: {reply}")
     speak(reply)
+ 
 
-
-
-   
+  

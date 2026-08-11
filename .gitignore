@@ -25,3 +25,8 @@ models/
 Thumbs.db
 # Browser profile / runtime data — NEVER commit
 chrome-profile/
+chrome-profile/
+reply.wav
+__pycache__/
+*.pyc
+config.py
