@@ -2,6 +2,8 @@
 # Flow: Enter to record -> Enter to stop -> whisper transcribes -> gemma4 replies -> TTS speaks
 # Install first:  pip install faster-whisper sounddevice numpy piper-tts requests
 
+import ctypes
+ctypes.windll.user32.SetProcessDPIAware()
 import numpy as np
 import sounddevice as sd
 import requests
@@ -16,8 +18,11 @@ import psutil
 import time
 import mss, mss.tools, base64
 import threading
+from PIL import Image
+import io
 
-VISION_MODEL = "qwen3-vl:8b"          # flip to "qwen3-vl:4b" once pulled
+
+VISION_MODEL = "qwen2.5vl:7b"          # flip to "qwen3-vl:4b" once pulled
 stop_watch = threading.Event()
 watching = False
 
@@ -29,19 +34,29 @@ def capture_screen(monitor=1):
 def describe_screen(frame_b64, prev=""):
     sys = ("You narrate a live screen out loud for Hunter. In ONE short spoken "
            "sentence, say only what is happening or what just changed. No markdown. "
-           "If nothing meaningful changed, reply exactly: (no change)")
+           "If nothing meaningful changed, reply exactly: (no change) /no_think")
     user = "Here is the screen now."
     if prev:
         user += f" Your last line was: '{prev}'. Say what's different now."
     try:
         r = requests.post(OLLAMA_URL, timeout=(3, 120), json={
             "model": VISION_MODEL, "stream": False,
+            "options": {"num_predict": 8192, "num_ctx": 8192},
             "messages": [{"role": "system", "content": sys},
                          {"role": "user", "content": user, "images": [frame_b64]}]})
         r.raise_for_status()
-        return r.json()["message"].get("content", "").strip()
+        msg = r.json()["message"]
+        print("  [locate] keys:", list(msg.keys()),
+              "| content:", repr(msg.get("content", "")),
+              "| thinking:", repr(msg.get("thinking", ""))[:200])
+        raw = msg.get("content", "")
     except requests.exceptions.RequestException:
         return ""
+    r = requests.post(OLLAMA_URL, timeout=(3, 120), json={
+            "model": VISION_MODEL, "stream": False,
+            "options": {"num_predict": 8192, "num_ctx": 8192},
+            "messages": [{"role": "system", "content": sys},
+                         {"role": "user", "content": user, "images": [frame_b64]}]})
 
 def watch_screen(interval=0.4):
     global watching
@@ -373,6 +388,70 @@ def ask_jarvis(text):
 OPEN_VERBS = ("open", "launch", "start", "run", "pull up",
               "bring up", "fire up", "boot up")
 
+# ---- vision-grounded clicking — place this block directly above `def route_command` ----
+import json, re
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = True      # slam the mouse into a screen corner to hard-abort
+except Exception:
+    pyautogui = None
+
+def locate_on_screen(target):
+    with mss.MSS() as sct:
+        mon = sct.monitors[1]
+        shot = sct.grab(mon)
+    img = Image.frombytes("RGB", shot.size, shot.rgb)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    frame_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    sys = ('You are a GUI grounding model. Output ONLY JSON: {"bbox_2d":[x1,y1,x2,y2]} — '
+           'the bounding box of the requested element in absolute pixels of this image. '
+           'If it is not visible, output {"bbox_2d": null}. No other text.')
+    try:
+        r = requests.post(OLLAMA_URL, timeout=(3, 60), json={
+            "model": VISION_MODEL, "stream": False,
+            "options": {"num_predict": 128, "num_ctx": 8192},
+            "keep_alive": "30m",
+            "messages": [{"role": "system", "content": sys},
+                         {"role": "user", "content": f"Find: {target}",
+                          "images": [frame_b64]}]})
+        r.raise_for_status()
+        raw = r.json()["message"].get("content", "")
+    except requests.exceptions.RequestException as e:
+        print("  [locate] failed:", e); return None
+
+    print("  [locate]", repr(raw))
+    m = re.search(r"\[[^\]]*\]", raw)
+    if not m:
+        return None
+    nums = [float(n) for n in re.findall(r"-?\d+\.?\d*", m.group())]
+    if len(nums) >= 4:
+        cx, cy = (nums[0] + nums[2]) / 2, (nums[1] + nums[3]) / 2
+    elif len(nums) == 2:
+        cx, cy = nums
+    else:
+        return None
+    return (int(cx) + mon["left"], int(cy) + mon["top"])
+
+def click_on_screen(target):
+    if pyautogui is None:
+        return "pyautogui isn't installed, so I can't click yet."
+    listening.set()
+    try:
+        spot = locate_on_screen(target)
+        if spot is None:
+            return f"I couldn't find {target}."
+        print("  [click] moving to", spot, "| cursor before:", pyautogui.position())
+        pyautogui.moveTo(*spot, duration=0.2)
+        pyautogui.click()
+        time.sleep(0.15)
+        pyautogui.click()          # second click lands after the window is focused
+        print("  [click] cursor after:", pyautogui.position())
+        return f"Clicked {target}."
+    finally:
+        listening.clear()
+
 def route_command(text):
     t = text.lower().strip()
 
@@ -400,8 +479,9 @@ def route_command(text):
         if t.startswith(kw):
             speak(browse({"url": text[len(kw):].strip()}))
             return True
-    if t.startswith("click "):
-        speak(click({"text": text[len("click "):].strip()}))
+    if t.startswith("click ") or t.startswith("press "):
+        prefix = "click " if t.startswith("click ") else "press "
+        speak(click_on_screen(text[len(prefix):].strip()))
         return True
 
     if t.startswith("what time") or "the time" in t or "current time" in t:

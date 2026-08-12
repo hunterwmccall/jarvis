@@ -30,3 +30,9 @@ reply.wav
 __pycache__/
 *.pyc
 config.py
+reply.wav
+*.wav
+__pycache__/
+*.pyc
+.venv/
+venv/
