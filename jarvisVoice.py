@@ -20,9 +20,9 @@ import mss, mss.tools, base64
 import threading
 from PIL import Image
 import io
+from win_click import click as os_click   # SendInput clicker, aliased so it doesn't clash with your Playwright click()
 
-
-VISION_MODEL = "qwen2.5vl:7b"          # flip to "qwen3-vl:4b" once pulled
+VISION_MODEL = "qwen2.5vl:7b"
 stop_watch = threading.Event()
 watching = False
 
@@ -40,24 +40,16 @@ def describe_screen(frame_b64, prev=""):
         user += f" Your last line was: '{prev}'. Say what's different now."
     try:
         r = requests.post(OLLAMA_URL, timeout=(3, 120), json={
-            "model": VISION_MODEL, "stream": False,
-            "options": {"num_predict": 8192, "num_ctx": 8192},
+            "model": VISION_MODEL, "stream": False, "keep_alive": -1,
+            "options": {"num_predict": 128, "num_ctx": 2048},
             "messages": [{"role": "system", "content": sys},
                          {"role": "user", "content": user, "images": [frame_b64]}]})
         r.raise_for_status()
-        msg = r.json()["message"]
-        print("  [locate] keys:", list(msg.keys()),
-              "| content:", repr(msg.get("content", "")),
-              "| thinking:", repr(msg.get("thinking", ""))[:200])
-        raw = msg.get("content", "")
+        return r.json()["message"].get("content", "").strip()
     except requests.exceptions.RequestException:
         return ""
-    r = requests.post(OLLAMA_URL, timeout=(3, 120), json={
-            "model": VISION_MODEL, "stream": False,
-            "options": {"num_predict": 8192, "num_ctx": 8192},
-            "messages": [{"role": "system", "content": sys},
-                         {"role": "user", "content": user, "images": [frame_b64]}]})
 
+    
 def watch_screen(interval=0.4):
     global watching
     watching = True
@@ -106,7 +98,7 @@ wake_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
 
 SAMPLE_RATE = 16000
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "gemma4"  # change to "gemma4:12b" if that's what `ollama list` shows
+MODEL = "gemma4:12b"  # change to "gemma4:12b" if that's what `ollama list` shows
 
 def speak(text):
     if not text or not text.strip():
@@ -401,8 +393,10 @@ def locate_on_screen(target):
         mon = sct.monitors[1]
         shot = sct.grab(mon)
     img = Image.frombytes("RGB", shot.size, shot.rgb)
+    SCALE = 0.65
+    small = img.resize((int(img.width*SCALE), int(img.height*SCALE)), Image.BILINEAR)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+    small.save(buf, format="JPEG", quality=85)
     frame_b64 = base64.b64encode(buf.getvalue()).decode()
 
     sys = ('You are a GUI grounding model. Output ONLY JSON: {"bbox_2d":[x1,y1,x2,y2]} — '
@@ -411,8 +405,8 @@ def locate_on_screen(target):
     try:
         r = requests.post(OLLAMA_URL, timeout=(3, 60), json={
             "model": VISION_MODEL, "stream": False,
-            "options": {"num_predict": 128, "num_ctx": 8192},
-            "keep_alive": "30m",
+            "options": {"num_predict": 128, "num_ctx": 2048},
+            "keep_alive": -1,
             "messages": [{"role": "system", "content": sys},
                          {"role": "user", "content": f"Find: {target}",
                           "images": [frame_b64]}]})
@@ -427,27 +421,27 @@ def locate_on_screen(target):
         return None
     nums = [float(n) for n in re.findall(r"-?\d+\.?\d*", m.group())]
     if len(nums) >= 4:
-        cx, cy = (nums[0] + nums[2]) / 2, (nums[1] + nums[3]) / 2
+        cx, cy = (nums[0]+nums[2])/2, (nums[1]+nums[3])/2
     elif len(nums) == 2:
-        cx, cy = nums
+        cx, cy = nums[0], nums[1]
     else:
         return None
+    cx, cy = cx / SCALE, cy / SCALE          # image px -> screen px
+    return (int(cx) + mon["left"], int(cy) + mon["top"])
     return (int(cx) + mon["left"], int(cy) + mon["top"])
 
 def click_on_screen(target):
-    if pyautogui is None:
-        return "pyautogui isn't installed, so I can't click yet."
     listening.set()
     try:
+        import time
+        t0 = time.perf_counter()
         spot = locate_on_screen(target)
+        t1 = time.perf_counter()
+        print(f"  [timing] vision={t1-t0:.2f}s")
         if spot is None:
             return f"I couldn't find {target}."
-        print("  [click] moving to", spot, "| cursor before:", pyautogui.position())
-        pyautogui.moveTo(*spot, duration=0.2)
-        pyautogui.click()
-        time.sleep(0.15)
-        pyautogui.click()          # second click lands after the window is focused
-        print("  [click] cursor after:", pyautogui.position())
+        os_click(*spot)
+        print(f"  [timing] click={time.perf_counter()-t1:.3f}s")
         return f"Clicked {target}."
     finally:
         listening.clear()
@@ -502,6 +496,15 @@ def route_command(text):
                 return True
 
     return False   
+
+try:
+    requests.post(OLLAMA_URL, timeout=(3, 120), json={
+        "model": VISION_MODEL, "stream": False, "keep_alive": -1,
+        "messages": [{"role": "user", "content": "ok"}],
+        "options": {"num_predict": 1}})
+except requests.exceptions.RequestException:
+    pass
+
 while True:
     print("\nWaiting for wake word...")
     wait_for_wake()

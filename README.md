@@ -1,176 +1,76 @@
-Jarvis — Local Voice Assistant with Screen Vision
+Jarvis — Local Voice Assistant
 
-A fully local, offline-capable voice assistant for Windows. Say "hey Jarvis," ask it something, and it answers out loud. It can open apps, browse the web, check the weather, watch your screen and narrate what's happening, and click things on your screen by name — all running on your own machine with no cloud API.
+A fully local, voice-controlled desktop assistant for Windows. Say "Hey Jarvis", then talk to it. Everything runs on your own machine — no cloud APIs, no data leaving your PC.
 
-Nothing here talks to a paid service. The AI models run locally on your GPU.
+It can:
 
-What it can do
-Wake word — always listening for "hey Jarvis," no button to press
-Voice chat — ask it anything, hear the answer spoken back
-Open apps — "open Spotify," "launch OBS," "pull up Discord"
-Browse — "search for X," "go to youtube.com," "read the page"
-Screen narration — "watch my screen," and it describes what's happening live
-Vision clicking — "click the Google search bar," and it finds it and clicks it
-Utilities — time, weather, media server status
+Click anything on screen by name — "click the YouTube tab" finds it visually and clicks it
+Open apps by voice
+Browse, search, and read web pages through a controlled Chrome window
+Narrate your screen live
+Tell you the time, weather, and your Jellyfin server status
+Answer general questions using a local chat model
 
-Step 1 — Install Python
-Go to https://www.python.org/downloads/
-Download the latest Python for Windows.
-Run the installer. On the first screen, check the box that says "Add python.exe to PATH." This is the single most common thing people miss, and skipping it causes confusing errors later.
-Click "Install Now" and let it finish.
+Under the hood: Ollama runs the vision and chat models, faster-whisper does speech-to-text, Piper does text-to-speech, and openWakeWord listens for the wake word. Clicks are injected through the native Windows SendInput API for speed and accuracy.
 
-Verify it worked. Press Win + R, type powershell, hit Enter, then type:
+Requirements
+Windows 10 or 11 (uses Windows-only audio and input APIs)
+Python 3.10+
+A GPU with ~16 GB VRAM — it runs a 7B vision model plus a chat model locally
+Ollama installed and running
+Setup
+1. Get the code
+git clone https://github.com/hunterwmccall/<repo>.git
+cd <repo>
 
-powershell
-python --version
+Make sure win_click.py is in this folder — it's the low-level clicker the assistant uses.
 
-You should see something like Python 3.13.1. If you get an error about python not being recognized, PATH wasn't set — reinstall and check that box.
+2. Install Python packages
+pip install faster-whisper sounddevice numpy piper-tts requests openwakeword playwright psutil mss Pillow
 
-Step 2 — Install Ollama
+Then install the browser that the web tools drive:
 
-Ollama is the program that actually runs the AI models on your machine.
+playwright install chromium
+3. Install the AI models (Ollama)
 
-Go to https://ollama.com/download
-Download and run the Windows installer.
-After it installs, Ollama runs quietly in the background. You'll see its icon in your system tray (bottom-right, may be under the "^" arrow).
+Install Ollama, then pull the two models:
 
-Verify it worked:
-
-powershell
-ollama --version
-
-You need version 0.12.7 or newer. If yours is older, download the installer again to update — old versions can't handle the vision features.
-
-Step 3 — Download the AI models
-
-This downloads about 15GB, so it takes a while depending on your internet. Run each command and wait for it to finish before starting the next.
-
-powershell
-ollama pull gemma4
 ollama pull qwen2.5vl:7b
-gemma4 is the "brain" — it handles conversation and decides which tools to use.
-qwen2.5vl:7b is the "eyes" — it looks at screenshots and finds things on screen.
+ollama pull gemma4
+qwen2.5vl:7b is the vision model that finds things on screen.
+gemma4 is the chat model that answers questions.
 
-Verify they downloaded:
+Run ollama list and confirm the tag names match what's in the code. The vision tag is set at the top of jarvisVoice.py (VISION_MODEL); the chat tag is set inside chat_request. If your local tags differ, edit those to match.
 
-powershell
-ollama list
+4. Download the voice
 
-Both should appear in the list.
+Download the Piper voice files en_US-joe-medium.onnx and en_US-joe-medium.onnx.json and put both in this folder, next to jarvisVoice.py. (Grab them from the Piper voices page.)
 
-Note: If gemma4 isn't available, use ollama pull llama3.2 instead and change the model name inside the script (see Step 7).
-
-Step 4 — Get the code
-
-If you don't have Git, the easy way:
-
-Go to the GitHub page for this project.
-Click the green Code button → Download ZIP.
-Extract the ZIP to C:\jarvis (create that folder if it doesn't exist).
-
-If you do have Git, open PowerShell and run:
-
-powershell
-cd C:\
-git clone https://github.com/hunterwmccall/REPO-NAME.git jarvis
-
-Either way, you should end up with C:\jarvis\jarvisVoice.py on your computer.
-
-Step 5 — Install the Python libraries
-
-Open PowerShell and run these two commands:
-
-powershell
-cd C:\jarvis
-pip install numpy sounddevice requests piper-tts faster-whisper openwakeword playwright psutil mss pyautogui pillow
-
-This takes a few minutes. Some warnings in yellow text are normal — only red ERROR lines matter.
-
-If you get an error about Microsoft Visual C++, install the Build Tools from https://visualstudio.microsoft.com/visual-cpp-build-tools/ (select "Desktop development with C++"), then run the pip command again.
-
-Step 6 — Download the voice
-
-The assistant speaks using a Piper voice file, which isn't included in this repo because of its size.
-
-Go to https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/joe/medium
-Download both files:
-en_US-joe-medium.onnx
-en_US-joe-medium.onnx.json
-Put both directly in C:\jarvis (the same folder as jarvisVoice.py).
-
-Both files are required — the .json tells the program how to use the .onnx.
-
-Want a different voice? Browse https://huggingface.co/rhasspy/piper-voices and swap the filename in the script where it says PiperVoice.load(...).
-
-Step 7 — Configure it for your computer
-
-Open jarvisVoice.py in a text editor (Notepad works; VS Code is nicer). A few things are set up for the original author's machine and need changing for yours.
-
-A. Your apps. Find the APPS = { section. Each line maps a spoken name to how Windows launches that program. Delete apps you don't have, add ones you do:
-
-python
-APPS = {
-    "spotify": "spotify:",
-    "steam":   "steam://open/main",
-    ...
-}
-
-For a normal program, the full path to its .exe works. To find a path: right-click the app's shortcut → Properties → look at "Target."
-
-B. Chrome's path. In that same APPS block, make sure the Chrome line points to where Chrome actually is on your machine. The default is:
-
-C:\Program Files\Google\Chrome\Application\chrome.exe
-
-Leave the --remote-debugging-port=9222 part alone — that's what lets Jarvis control the browser. Also change --user-data-dir=C:\jarvis\chrome-profile if you put the project somewhere other than C:\jarvis.
-
-C. Your weather location. Find get_weather and replace the latitude/longitude with your own (google "my latitude longitude"):
-
-python
-"latitude": 34.72, "longitude": -76.73,
-
-D. Optional — the media server check. If you don't run a Jellyfin server, ignore the check_jellyfin function or delete it. If you do, put your server's IP in.
-
-E. Your games. GAME_PROCESSES lists games that trigger a lighter, faster AI model so it doesn't hurt your framerate. Get exact .exe names from Task Manager → Details tab.
-
-Step 8 — Run it
-powershell
-cd C:\jarvis
+5. (Optional) Point the extras at your setup
+Jellyfin: edit the IP in check_jellyfin to your server, or ignore that command.
+Chrome: if Chrome isn't in the default install path, fix the chrome line in the APPS dictionary.
+Run it
 python jarvisVoice.py
 
-The first run downloads a speech-recognition model (~150MB), so give it a minute. When you see:
+Wait for Waiting for wake word..., say "Hey Jarvis", wait for the beep, then speak your command.
 
-Waiting for wake word...
+The first click after startup is slower (the vision model loads into VRAM). After that it stays loaded and clicks are fast.
 
-...it's live. Say "hey Jarvis", wait for the beep, then speak your command.
-
-To stop it: click the PowerShell window and press Ctrl + C.
-
-Things to say
-Say this	What happens
-"hey Jarvis"	Wakes it up — wait for the beep, then talk
-"what time is it"	Speaks the time
-"what's the weather"	Current conditions for your configured location
-"open Spotify"	Launches any app in your APPS list
-"search for cheap GPUs"	Searches the web and reads results
-"go to youtube.com"	Opens that site
-"read the page"	Reads the current webpage aloud
-"watch my screen"	Starts live narration of your screen
-"stop watching"	Ends narration
-"click the search bar"	Finds that element on screen and clicks it
-
-For clicking, be descriptive. "Click the blue Sign In button in the top right" works much better than "click sign in." The AI is looking at a picture of your screen and has to find what you're describing.
-
-Safety note
-
-This program controls your mouse. If a click goes somewhere unexpected, slam your mouse into any corner of the screen — that triggers PyAutoGUI's failsafe and stops it immediately.
-
-How Works
-Wake word (openWakeWord) → record mic (sounddevice)
-    → speech to text (faster-whisper, local)
-    → command router: exact matches handled instantly
-    → otherwise → gemma4 (via Ollama) picks a tool or answers
-    → text to speech (Piper) → speakers
-
-Don't run screen-clicking features while something sensitive is open
-
-Built with Ollama, faster-whisper, Piper, openWakeWord, Playwright, and Qwen/Gemma open models.
+What you can say
+Say	It does
+"Hey Jarvis, click the YouTube tab"	Finds it on screen and clicks it
+"Hey Jarvis, open Spotify"	Launches an app (spotify, steam, discord, chrome, obs, …)
+"Hey Jarvis, search for best ramen near me"	Web search, reads results aloud
+"Hey Jarvis, go to github.com"	Opens a site in the browser
+"Hey Jarvis, what time is it" / "what's the weather"	Speaks the answer
+"Hey Jarvis, watch my screen" / "stop watching"	Narrates your screen live until you stop it
+"Hey Jarvis, is Jellyfin online"	Pings your media server
+Anything else	Answered by the local chat model
+Tuning
+Click speed vs. accuracy — SCALE in locate_on_screen (default 0.65). Lower is faster but can miss small targets; higher is more accurate but slower.
+Wake-word sensitivity — the 0.5 threshold in wait_for_wake. Lower triggers more easily.
+End-of-speech delay — silence_duration in record_command (how long a pause ends your command).
+Notes
+Windows only — relies on winsound and the Win32 SendInput API.
+The vision model is pinned in VRAM (keep_alive: -1) so clicks stay fast; the chat model loads on demand.
+Runs fully offline once models and voice files are downloaded.
