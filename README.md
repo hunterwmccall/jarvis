@@ -20,8 +20,8 @@ A GPU with ~16 GB VRAM — it runs a 7B vision model plus a chat model locally
 Ollama installed and running
 Setup
 1. Get the code
-git clone https://github.com/hunterwmccall/<repo>.git
-cd <repo>
+git clone https://github.com/hunterwmccall/jarvis.git
+cd jarvis.git
 
 Make sure win_click.py is in this folder — it's the low-level clicker the assistant uses.
 
